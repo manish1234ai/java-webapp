@@ -1,0 +1,125 @@
+pipeline {
+    agent any
+
+    tools {
+        maven 'Maven s/w'          // Use the name you configured in Jenkins Global Tools
+        jdk 'java s/w'             // Use the name you configured in Jenkins Global Tools
+    }
+
+    environment {
+        // SonarQube Configuration
+        SONAR_HOST_URL = 'http://localhost:9000'
+        SONAR_TOKEN = credentials('sonar-token')          // Secret text credential
+        
+        // Nexus Configuration
+        NEXUS_URL = 'http://localhost:8081'
+        NEXUS_CREDENTIALS = credentials('nexus-credentials')  // Username/password credential
+        
+        // Tomcat Configuration
+        TOMCAT_URL = 'http://localhost:9090/manager/text'
+        TOMCAT_CREDENTIALS = 'admin:admin'                 // Change if different
+        TOMCAT_APP_PATH = '/mywebapp'                      // Context path for your app
+    }
+
+    stages {
+        // 1. Checkout code from GitHub
+        stage('Checkout') {
+            steps {
+                echo 'Cloning repository from GitHub...'
+                git branch: 'master', 
+                    url: 'https://github.com/manish1234ai/java-webapp.git'
+            }
+        }
+
+        // 2. Build and run unit tests
+        stage('Build & Unit Tests') {
+            steps {
+                echo 'Building the application and running unit tests...'
+                sh 'mvn clean test'
+            }
+        }
+
+        // 3. SonarQube Code Quality Analysis
+        stage('SonarQube Analysis') {
+            steps {
+                echo 'Running SonarQube code quality analysis...'
+                withSonarQubeEnv('SonarQube') {
+                    sh '''
+                        mvn sonar:sonar \
+                        -Dsonar.host.url=$SONAR_HOST_URL \
+                        -Dsonar.token=$SONAR_TOKEN \
+                        -Dsonar.java.binaries=target/classes
+                    '''
+                }
+            }
+        }
+
+        // 4. Wait for Quality Gate (SonarQube)
+        stage('Quality Gate') {
+            steps {
+                echo 'Waiting for SonarQube Quality Gate...'
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        // 5. Package the WAR file
+        stage('Package WAR') {
+            steps {
+                echo 'Packaging the WAR file...'
+                sh 'mvn package -DskipTests'
+            }
+        }
+
+        // 6. Upload WAR to Nexus Repository
+        stage('Upload to Nexus') {
+            steps {
+                echo 'Uploading WAR to Nexus Repository...'
+                sh 'mvn deploy'
+            }
+        }
+
+        // 7. Deploy to Tomcat
+        stage('Deploy to Tomcat') {
+            steps {
+                echo 'Deploying WAR to Tomcat...'
+                script {
+                    // Find the generated WAR file
+                    def warFile = findFiles(glob: 'target/*.war')[0].path
+                    echo "Deploying: ${warFile}"
+                    
+                    // Deploy using Tomcat Manager
+                    sh """
+                        curl -v -u ${TOMCAT_CREDENTIALS} \
+                        --upload-file ${warFile} \
+                        "${TOMCAT_URL}/deploy?path=${TOMCAT_APP_PATH}&update=true"
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        // Always run: clean up workspace
+        always {
+            echo 'Pipeline execution completed.'
+            cleanWs()
+        }
+        
+        // Success: notify user
+        success {
+            echo """
+                ✅ Pipeline succeeded!
+                Application deployed to: http://44.222.212.88:9090${TOMCAT_APP_PATH}
+                SonarQube Dashboard: http://localhost:9091/dashboard?id=com.example%3Amywebapp
+                Nexus Repository: http://localhost:8081/#browse/browse:maven-snapshots
+            """
+        }
+        
+        // Failure: notify user
+        failure {
+            echo '❌ Pipeline failed. Check the console logs for details.'
+        }
+    }
+}
